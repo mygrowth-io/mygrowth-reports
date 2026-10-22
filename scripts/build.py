@@ -12,7 +12,8 @@ Usage: python3 scripts/build.py <data_dir> <repo_dir> <out_dir>
 <repo_dir>/clients.json lists each client page:
   {"auditor-alpha": {"title": "...", "campaign_prefix": "Auditor Alpha", "target": 6}}
 Each client gets <out_dir>/<slug>.html (plaintext, never committed: refresh.sh
-encrypts it into <repo_dir>/<slug>/index.html). No message text is included.
+encrypts it into <repo_dir>/<slug>/index.html). A picker switches between campaigns.
+clients.json may also list "campaign_ids" to add campaigns whose name lacks the prefix.
 """
 import html
 import json
@@ -44,6 +45,14 @@ def short_name(full):
     if len(parts) == 1:
         return parts[0]
     return f"{parts[0]} {parts[1][0].upper()}."
+
+
+def preview(text):
+    """lemlist gives the first ~100 characters of the reply; tidy blank lines, mark cuts."""
+    t = "\n".join(line.strip() for line in (text or "").splitlines() if line.strip())
+    if not t:
+        return "—"
+    return t + "…" if len(text or "") >= 99 else t
 
 
 def fmt_dt(iso):
@@ -88,7 +97,7 @@ def campaign_block(camp, stats, inbox, target):
     progress = min(100, interested / target * 100) if target else 0
 
     out = []
-    out.append(f'<section class="camp"><h2 class="camp-name">{esc(camp.get("name"))}</h2>')
+    out.append(f'<section class="camp" data-camp="{esc(camp.get("id"))}">')
     out.append('<div class="grid">')
     target_html = f' <small>/ {target}</small>' if target else ""
     out.append(
@@ -137,18 +146,31 @@ def campaign_block(camp, stats, inbox, target):
     convs = inbox.get("conversations", []) or []
     convs = sorted(convs, key=lambda c: c.get("lastRepliedAt") or "", reverse=True)
     out.append('<div class="card"><h3>Conversations</h3><div class="tw"><table>')
-    out.append('<thead><tr><th>Prospect</th><th>Replied</th><th>Last activity</th></tr></thead><tbody>')
+    out.append('<thead><tr><th>Prospect</th><th>Their reply</th><th>Last activity</th></tr></thead><tbody>')
     if convs:
         for cv in convs:
-            out.append(f'<tr><td>{esc(short_name(cv.get("contactName")))}</td>'
-                       f'<td>{esc(fmt_dt(cv.get("lastRepliedAt")))}</td>'
-                       f'<td>{esc(fmt_dt(cv.get("lastActivityAt")))}</td></tr>')
+            out.append(f'<tr><td class="nm">{esc(cv.get("contactName") or "Prospect")}</td>'
+                       f'<td class="preview">{esc(preview(cv.get("lastRepliedMessagePreview")))}</td>'
+                       f'<td class="nm">{esc(fmt_dt(cv.get("lastActivityAt")))}</td></tr>')
     else:
         out.append('<tr><td colspan="3" class="muted-t">No replies yet.</td></tr>')
     out.append("</tbody></table></div></div>")
     out.append("</section>")
     return "\n".join(out)
 
+
+JS = """<script>
+(function () {
+  var sel = document.getElementById('camp-select');
+  var secs = document.querySelectorAll('section.camp');
+  function show(id) { secs.forEach(function (s) { s.hidden = s.getAttribute('data-camp') !== id; }); }
+  if (!sel) return;
+  var want = location.hash.slice(1);
+  if (want && sel.querySelector('option[value="' + want + '"]')) sel.value = want;
+  show(sel.value);
+  sel.addEventListener('change', function () { show(sel.value); history.replaceState(null, '', '#' + sel.value); });
+})();
+</script>"""
 
 CSS = """
 :root{--bg:#f7f6f2;--panel:#fff;--fg:#1f1e1c;--muted:#6b6a65;--line:#e4e2db;--accent:#2f6fde;--grey:#c9c6bd;--track:#eceae4}
@@ -161,7 +183,11 @@ body{margin:0;background:var(--bg);color:var(--fg);font-family:"Inter",system-ui
 h1{font-family:Georgia,"Times New Roman",serif;font-weight:400;font-size:32px;margin:0}
 .updated{color:var(--muted);font-size:13px;margin:6px 0 0}
 .camp{display:flex;flex-direction:column;gap:16px}
-.camp-name{font-size:18px;font-weight:600;margin:8px 0 0}
+.camp[hidden]{display:none}
+.pick{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;color:var(--muted);font-size:13px}
+.pick select{font:inherit;font-size:15px;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 10px;max-width:100%}
+.preview{white-space:pre-line;min-width:14rem}
+.nm{white-space:nowrap;vertical-align:top}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr));gap:12px}
 .grid.wide{grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr))}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:8px;min-width:0}
@@ -198,14 +224,22 @@ def build(data_dir, repo_dir, out_dir):
         if slug.startswith("_"):
             continue
         prefix = cfg.get("campaign_prefix", "")
-        mine = [c for c in campaigns if (c.get("name") or "").startswith(prefix)]
-        blocks = []
+        extra = set(cfg.get("campaign_ids", []))
+        mine = [c for c in campaigns if (prefix and (c.get("name") or "").startswith(prefix)) or c.get("id") in extra]
+        blocks, options = [], []
         for camp in mine:
             sp = data_dir / f"stats_{camp['id']}.json"
             ip = data_dir / f"inbox_{camp['id']}.json"
             if not sp.exists():
                 continue
             blocks.append(campaign_block(camp, load(sp), load(ip) if ip.exists() else {}, cfg.get("target")))
+            label = camp.get("name") or camp["id"]
+            if camp.get("status") and camp.get("status") != "running":
+                label += f" ({camp['status']})"
+            options.append(f'<option value="{esc(camp["id"])}">{esc(label)}</option>')
+        picker = ""
+        if options:
+            picker = ('<label class="pick">Campaign <select id="camp-select">' + "".join(options) + '</select></label>')
         if not blocks:
             blocks.append('<p class="note">No campaign data yet.</p>')
         page = f"""<!doctype html>
@@ -217,10 +251,12 @@ def build(data_dir, repo_dir, out_dir):
 <body><main class="wrap">
 <header><p class="eyebrow">My Growth · LinkedIn outbound report</p>
 <h1>{esc(cfg.get('title', slug))}</h1>
-<p class="updated">Updated {now.strftime('%-d %b %Y, %H:%M')} (Paris time) · refreshed daily</p></header>
+<p class="updated">Updated {now.strftime('%-d %b %Y, %H:%M')} (Paris time) · refreshed daily</p>
+{picker}</header>
 {chr(10).join(blocks)}
 <footer>Source: lemlist, LinkedIn channel. Report prepared by My Growth.</footer>
-</main></body></html>
+</main>
+{JS}</body></html>
 """
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{slug}.html"
