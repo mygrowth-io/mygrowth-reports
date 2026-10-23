@@ -7,7 +7,10 @@ Usage: python3 scripts/build.py <data_dir> <repo_dir> <out_dir>
   campaigns.json          answer of lemlist get_campaigns
   stats_<campaignId>.json answer of lemlist get_campaigns_stats for that campaign
   inbox_<campaignId>.json answer of lemlist get_inbox_conversations
-                          (listId teamConversations, campaignFilter in [id])
+                          (listId teamConversations, campaignFilter in [id]);
+                          each conversation may add "firstReplyMessage", the lead's
+                          first reply (oldest *Replied activity from get_inbox_conversation),
+                          shown instead of lastRepliedMessagePreview
 
 <repo_dir>/clients.json lists each client page:
   {"auditor-alpha": {"title": "...", "campaign_prefix": "Auditor Alpha", "target": 6}}
@@ -48,11 +51,13 @@ def short_name(full):
 
 
 def preview(text):
-    """lemlist gives the first ~100 characters of the reply; tidy blank lines, mark cuts."""
-    t = "\n".join(line.strip() for line in (text or "").splitlines() if line.strip())
+    """First ~100 characters of a reply; tidy blank lines, mark cuts."""
+    raw = text or ""
+    cut = len(raw) >= 99
+    t = "\n".join(line.strip() for line in raw[:100].splitlines() if line.strip())
     if not t:
         return "—"
-    return t + "…" if len(text or "") >= 99 else t
+    return t + "…" if cut else t
 
 
 def fmt_dt(iso):
@@ -150,7 +155,7 @@ def campaign_block(camp, stats, inbox, target):
     if convs:
         for cv in convs:
             out.append(f'<tr><td class="nm">{esc(cv.get("contactName") or "Prospect")}</td>'
-                       f'<td class="preview">{esc(preview(cv.get("lastRepliedMessagePreview")))}</td>'
+                       f'<td class="preview">{esc(preview(cv.get("firstReplyMessage") or cv.get("lastRepliedMessagePreview")))}</td>'
                        f'<td class="nm">{esc(fmt_dt(cv.get("lastActivityAt")))}</td></tr>')
     else:
         out.append('<tr><td colspan="3" class="muted-t">No replies yet.</td></tr>')
